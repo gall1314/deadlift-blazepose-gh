@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 from blazepose import BlazePose  # You must implement or import the correct GH version here
 
@@ -135,7 +136,7 @@ def run_deadlift_analysis(video_path, frame_skip=3, scale=0.4):
     cap.release()
     technique_score = round(np.mean(all_scores) * 2) / 2 if all_scores else 0
     if not overall_feedback:
-        overall_feedback.append("Great form! Your back stayed straight throughout the movement. Keep it up! 💪")
+        overall_feedback.append("Great form! Keep it up! 💪")
 
     return {
         "technique_score": technique_score,
@@ -144,4 +145,5 @@ def run_deadlift_analysis(video_path, frame_skip=3, scale=0.4):
         "bad_reps": bad_reps,
         "feedback": overall_feedback,
         "problem_reps": problem_reps,
-   
+    }
+
