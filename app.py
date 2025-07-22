@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 import os
+from deadlift_analysis import run_deadlift_analysis  # שים לב שאתה צריך את הפונקציה הזו בקוד שלך
 
 app = Flask(__name__)
 
@@ -16,11 +17,8 @@ def analyze():
     save_path = "/tmp/uploaded_video.mp4"
     video_file.save(save_path)
 
-    result = {
-        "filename": video_file.filename,
-        "size_MB": round(os.path.getsize(save_path) / 1024 / 1024, 2),
-        "status": "✅ Video received and saved successfully"
-    }
+    # הרצת ניתוח על הוידאו עם הפונקציה שלך
+    result = run_deadlift_analysis(save_path)
 
     return jsonify(result)
 
