@@ -1,4 +1,4 @@
-flask
-mediapipe
+torch
 opencv-python
 numpy
+blazepose-gh
