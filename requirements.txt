@@ -1,4 +1,4 @@
-torch
+flask
+mediapipe
 opencv-python
 numpy
-imageio
