@@ -1,6 +1,5 @@
-import cv2
-import mediapipe as mp
 import numpy as np
+from blazepose import BlazePose  # You must implement or import the correct GH version here
 
 def calculate_angle(a, b, c):
     a, b, c = map(np.array, [a, b, c])
@@ -16,18 +15,18 @@ def analyze_back_curvature(shoulder, hip, reference_point, threshold=0.04):
     proj_len = np.dot(reference_point - shoulder, line_unit)
     proj_point = shoulder + proj_len * line_unit
     offset_vec = reference_point - proj_point
-    direction_sign = np.sign(offset_vec[1]) * -1
+    direction_sign = np.sign(offset_vec[1]) * -1  # inward = negative
     curvature_magnitude = np.linalg.norm(offset_vec)
     signed_curvature = direction_sign * curvature_magnitude
     is_dangerous = signed_curvature < -threshold
     return signed_curvature, is_dangerous
 
 def run_deadlift_analysis(video_path, frame_skip=3, scale=0.4):
-    mp_pose = mp.solutions.pose
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return {"error": "Could not open video"}
 
+    detector = BlazePose()
     counter = good_reps = bad_reps = 0
     all_scores = []
     problem_reps = []
@@ -42,114 +41,96 @@ def run_deadlift_analysis(video_path, frame_skip=3, scale=0.4):
     spine_curvature = 0
     spine_flagged = False
 
-    with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5, model_complexity=2) as pose:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-            frame_index += 1
-            if frame_index % frame_skip != 0:
+        frame_index += 1
+        if frame_index % frame_skip != 0:
+            continue
+
+        if scale != 1.0:
+            frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
+
+        keypoints = detector.process_frame(frame)  # Your implementation must return 3D keypoints
+        if keypoints is None:
+            continue
+
+        try:
+            kp = {k: np.array(keypoints[k][:2]) for k in [
+                "right_shoulder", "right_hip", "right_knee", "right_ankle", "head"
+            ] if k in keypoints}
+
+            if len(kp) < 5:
                 continue
 
-            if scale != 1.0:
-                frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
-            image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(image)
-            if not results.pose_landmarks:
-                continue
+            shoulder = kp["right_shoulder"]
+            hip = kp["right_hip"]
+            knee = kp["right_knee"]
+            ankle = kp["right_ankle"]
+            head = kp["head"]
 
-            try:
-                lm = results.pose_landmarks.landmark
+            delta_x = abs(hip[0] - shoulder[0])
+            knee_angle = calculate_angle(hip, knee, ankle)
+            mid_spine = (shoulder + hip) * 0.5 * 0.4 + head * 0.6
+            curvature, is_rounded = analyze_back_curvature(shoulder, hip, mid_spine)
 
-                shoulder = np.array([lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].x,
-                                     lm[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y])
-                hip = np.array([lm[mp_pose.PoseLandmark.RIGHT_HIP.value].x,
-                                lm[mp_pose.PoseLandmark.RIGHT_HIP.value].y])
-                knee = np.array([lm[mp_pose.PoseLandmark.RIGHT_KNEE.value].x,
-                                 lm[mp_pose.PoseLandmark.RIGHT_KNEE.value].y])
-                ankle = np.array([lm[mp_pose.PoseLandmark.RIGHT_ANKLE.value].x,
-                                  lm[mp_pose.PoseLandmark.RIGHT_ANKLE.value].y])
+            if rep_in_progress:
+                max_delta_x = max(max_delta_x, delta_x)
+                min_knee_angle = min(min_knee_angle, knee_angle)
+                spine_curvature = min(spine_curvature, curvature)
+                spine_flagged = spine_flagged or is_rounded
 
-                head_candidates = [
-                    lm[mp_pose.PoseLandmark.RIGHT_EAR.value],
-                    lm[mp_pose.PoseLandmark.LEFT_EAR.value],
-                    lm[mp_pose.PoseLandmark.NOSE.value]
-                ]
-                head_point = None
-                for candidate in head_candidates:
-                    if candidate.visibility > 0.5:
-                        head_point = np.array([candidate.x, candidate.y])
-                        break
-                if head_point is None:
-                    continue
+            if not rep_in_progress and delta_x > 0.08:
+                rep_in_progress = True
+                max_delta_x = delta_x
+                min_knee_angle = knee_angle
+                spine_curvature = curvature
+                spine_flagged = is_rounded
 
-                delta_x = abs(hip[0] - shoulder[0])
-                knee_angle = calculate_angle(hip, knee, ankle)
+            elif rep_in_progress and delta_x < 0.035:
+                if frame_index - last_rep_frame > MIN_FRAMES_BETWEEN_REPS:
+                    delta_range = max_delta_x - delta_x
+                    if delta_range > 0.05 and min_knee_angle < 160:
+                        feedbacks = []
+                        penalty = 0
 
-                mid_spine = (shoulder + hip) * 0.5 * 0.4 + head_point * 0.6
-                curvature, is_rounded = analyze_back_curvature(shoulder, hip, mid_spine)
+                        if delta_x > 0.05:
+                            feedbacks.append("Try to finish more upright")
+                            penalty += 1
+                        if max_delta_x > 0.18 and min_knee_angle > 170:
+                            feedbacks.append("Try to bend your knees as you lean forward")
+                            penalty += 1
+                        if min_knee_angle > 165 and max_delta_x > 0.2:
+                            feedbacks.append("Try to lift your chest and hips together")
+                            penalty += 1
+                        if spine_flagged:
+                            feedbacks.append("Your spine is rounding inward too much")
+                            penalty += 2.5
 
-                if rep_in_progress:
-                    max_delta_x = max(max_delta_x, delta_x)
-                    min_knee_angle = min(min_knee_angle, knee_angle)
-                    spine_curvature = min(spine_curvature, curvature)
-                    spine_flagged = spine_flagged or is_rounded
+                        score = round(max(4, 10 - penalty) * 2) / 2
+                        for f in feedbacks:
+                            if f not in overall_feedback:
+                                overall_feedback.append(f)
 
-                if not rep_in_progress:
-                    if delta_x > 0.08:
-                        rep_in_progress = True
-                        max_delta_x = delta_x
-                        min_knee_angle = knee_angle
-                        spine_curvature = curvature
-                        spine_flagged = is_rounded
+                        counter += 1
+                        last_rep_frame = frame_index
+                        if score >= 9.5:
+                            good_reps += 1
+                        else:
+                            bad_reps += 1
+                            problem_reps.append(counter)
+                        all_scores.append(score)
 
-                elif rep_in_progress and delta_x < 0.035:
-                    if frame_index - last_rep_frame > MIN_FRAMES_BETWEEN_REPS:
-                        delta_range = max_delta_x - delta_x
-                        if delta_range > 0.05 and min_knee_angle < 160:
-                            feedbacks = []
-                            penalty = 0
+                rep_in_progress = False
+                max_delta_x = 0
+                min_knee_angle = 999
+                spine_curvature = 0
+                spine_flagged = False
 
-                            if delta_x > 0.05:
-                                feedbacks.append("Try to finish more upright")
-                                penalty += 1
-                            if max_delta_x > 0.18 and min_knee_angle > 170:
-                                feedbacks.append("Try to bend your knees as you lean forward")
-                                penalty += 1
-                            if min_knee_angle > 165 and max_delta_x > 0.2:
-                                feedbacks.append("Try to lift your chest and hips together")
-                                penalty += 1
-
-                            if spine_flagged:
-                                feedbacks.append("Your spine is rounding inward too much")
-                                penalty += 2.5
-
-                            score = round(max(4, 10 - penalty) * 2) / 2
-
-                            for f in feedbacks:
-                                if f not in overall_feedback:
-                                    overall_feedback.append(f)
-
-                            counter += 1
-                            last_rep_frame = frame_index
-
-                            if score == 10.0:
-                                good_reps += 1
-                            else:
-                                bad_reps += 1
-                                problem_reps.append(counter)
-
-                            all_scores.append(score)
-
-                    rep_in_progress = False
-                    max_delta_x = 0
-                    min_knee_angle = 999
-                    spine_curvature = 0
-                    spine_flagged = False
-
-            except Exception:
-                continue
+        except Exception:
+            continue
 
     cap.release()
     technique_score = round(np.mean(all_scores) * 2) / 2 if all_scores else 0
@@ -163,4 +144,4 @@ def run_deadlift_analysis(video_path, frame_skip=3, scale=0.4):
         "bad_reps": bad_reps,
         "feedback": overall_feedback,
         "problem_reps": problem_reps,
-    }
+   
